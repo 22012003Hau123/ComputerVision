@@ -1,113 +1,177 @@
-﻿#include <opencv2/opencv.hpp> // Include the OpenCV library
-#include <iostream> // Include input-output stream library
-#include <string> // Include string manipulation library
+﻿#include <opencv2/opencv.hpp>
+#include <iostream>
 
-using namespace cv; // Use the cv namespace for OpenCV functions
+using namespace cv;
+using namespace std;
 
-// Function to draw connections between keypoints
-void drawMatches(const Mat& templateImage, const std::vector<KeyPoint>& keypointsTemplate,
-    const Mat& sceneImage, const std::vector<KeyPoint>& keypointsScene,
-    const std::vector<DMatch>& matches, Mat& outputImage) {
-    // Draw connections
-    drawMatches(templateImage, keypointsTemplate, sceneImage, keypointsScene, matches, outputImage,
-        Scalar::all(-1), Scalar::all(-1), std::vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
+// Load the image
+Mat loadImage(const string& imagePath) {
+    Mat image = imread(imagePath, IMREAD_COLOR);
+    if (image.empty()) {
+        cout << "Error loading image" << endl;
+    }
+    return image;
 }
 
-int main(int argc, char* argv[]) {
-    // Check the number of input arguments
-    if (argc != 5) {
-        std::cerr << "Usage: " << argv[0] << " -sift <TemplateImagePath> <SceneImagePath> <OutputImagePath>" << std::endl;
-        return -1;
-    }
+int convert_to_gray(const cv::Mat& srcImage, cv::Mat& dstImage) {
+    
+    if (srcImage.empty())
+        return 0;
 
-    // Parse command-line arguments
-    std::string templateImagePath, sceneImagePath, outputImagePath;
-    if (std::string(argv[1]) == "-sift") {
-        templateImagePath = argv[2];
-        sceneImagePath = argv[3];
-        outputImagePath = argv[4];
-    }
-    else {
-        std::cerr << "Invalid command format." << std::endl;
-        return -1;
-    }
+    int height = srcImage.rows;
+    int width = srcImage.cols;
 
-    // Load template and scene images
-    Mat templateImage = imread(templateImagePath);
-    Mat sceneImage = imread(sceneImagePath);
+    dstImage = cv::Mat(height, width, CV_8UC1);
 
-    // Check if images are loaded successfully
-    if (templateImage.empty() || sceneImage.empty()) {
-        std::cerr << "Error: Unable to load images." << std::endl;
-        return -1;
-    }
-
-    // Convert images to grayscale
-    Mat templateGray, sceneGray;
-    cvtColor(templateImage, templateGray, COLOR_BGR2GRAY);
-    cvtColor(sceneImage, sceneGray, COLOR_BGR2GRAY);
-
-    // Initialize SIFT detector
-    Ptr<SIFT> sift = SIFT::create();
-
-    // Detect keypoints and compute descriptors for template and scene images
-    std::vector<KeyPoint> keypointsTemplate, keypointsScene;
-    Mat descriptorsTemplate, descriptorsScene;
-    sift->detectAndCompute(templateGray, noArray(), keypointsTemplate, descriptorsTemplate);
-    sift->detectAndCompute(sceneGray, noArray(), keypointsScene, descriptorsScene);
-
-    // Initialize Brute Force matcher
-    BFMatcher matcher(NORM_L2);
-
-    // Match descriptors
-    std::vector<std::vector<DMatch>> knnMatches;
-    matcher.knnMatch(descriptorsTemplate, descriptorsScene, knnMatches, 2);
-
-    // Apply ratio test to filter good matches
-    std::vector<DMatch> goodMatches;
-    const float ratio_thresh = 0.75f;
-    for (size_t i = 0; i < knnMatches.size(); i++) {
-        if (knnMatches[i][0].distance < ratio_thresh * knnMatches[i][1].distance) {
-            goodMatches.push_back(knnMatches[i][0]);
+    for (int y = 0; y < height; ++y) {
+        const uchar* pSrcRow = srcImage.ptr<uchar>(y);
+        uchar* pDstRow = dstImage.ptr<uchar>(y);
+        for (int x = 0; x < width; ++x) {
+            pDstRow[x] = (uchar)((pSrcRow[3 * x] + pSrcRow[3 * x + 1] + pSrcRow[3 * x + 2]) / 3);
         }
     }
 
-    // Draw connections
-    Mat outputImage;
-    drawMatches(templateImage, keypointsTemplate, sceneImage, keypointsScene, goodMatches, outputImage);
+    return 1;
+}
 
-    //-- Localize the object
-    std::vector<Point2f> obj;
-    std::vector<Point2f> scene;
-    for (int i = 0; i < goodMatches.size(); i++) {
-        obj.push_back(keypointsTemplate[goodMatches[i].queryIdx].pt);
-        scene.push_back(keypointsScene[goodMatches[i].trainIdx].pt);
+Mat convertToGray(const Mat& colorImage) {
+    Mat grayImage;
+    convert_to_gray(colorImage, grayImage);
+    return grayImage;
+}
+
+Mat getGaussianKernel1(int ksize, double sigma, int type) {
+    Mat kernel(ksize, ksize, type);
+    double sigmaX = sigma > 0 ? sigma : 0.3 * ((ksize - 1) * 0.5 - 1) + 0.8;
+    double sum = 0.0;
+
+    for (int i = 0; i < ksize; i++) {
+        for (int j = 0; j < ksize; j++) {
+            double x = i - ksize * 0.5;
+            double y = j - ksize * 0.5;
+            double g = exp(-(x * x + y * y) / (2 * sigmaX * sigmaX));
+            kernel.at<double>(i, j) = g;
+            sum += g;
+        }
     }
 
-    // Find homography matrix
-    Mat H = findHomography(obj, scene, RANSAC);
+    kernel /= sum;
 
-    //-- Get the corners from the template image
-    std::vector<Point2f> objCorners(4);
-    objCorners[0] = Point2f(0, 0);
-    objCorners[1] = Point2f(templateImage.cols, 0);
-    objCorners[2] = Point2f(templateImage.cols, templateImage.rows);
-    objCorners[3] = Point2f(0, templateImage.rows);
-    std::vector<Point2f> scene_corners(4);
+    return kernel;
+}
+void GaussianBlurr(InputArray src, OutputArray dst, Size ksize,double sigmaX, double sigmaY, int borderType) {
 
-    // Perspective transform
-    perspectiveTransform(objCorners, scene_corners, H);
+    if (ksize.width % 2 == 0 || ksize.height % 2 == 0) {
+        CV_Error(Error::StsBadArg, "ksize.width and ksize.height must be odd!");
+    }
 
-    //-- Draw boundaries
-    line(outputImage, scene_corners[0] + Point2f(templateImage.cols, 0), scene_corners[1] + Point2f(templateImage.cols, 0), Scalar(0, 255, 0), 4);
-    line(outputImage, scene_corners[1] + Point2f(templateImage.cols, 0), scene_corners[2] + Point2f(templateImage.cols, 0), Scalar(0, 255, 0), 4);
-    line(outputImage, scene_corners[2] + Point2f(templateImage.cols, 0), scene_corners[3] + Point2f(templateImage.cols, 0), Scalar(0, 255, 0), 4);
-    line(outputImage, scene_corners[3] + Point2f(templateImage.cols, 0), scene_corners[0] + Point2f(templateImage.cols, 0), Scalar(0, 255, 0), 4);
+    Mat kernel = getGaussianKernel1(ksize.width, sigmaX, CV_64F);
+    kernel = kernel.t() * kernel;
+    int depth = src.depth();
 
-    // Save the result image
-    imwrite(outputImagePath, outputImage);
+    filter2D(src, dst, depth, kernel, Point(-1, -1), 0, borderType);
+}
 
-    std::cout << "SIFT OKE AND SAVE : " << outputImagePath << std::endl;
 
+
+void Harris(const Mat& src_gray, Mat& dst, double k = 0.04) {
+    if (src_gray.empty() || src_gray.depth() != CV_8U || src_gray.channels() != 1) {
+        std::cerr << "Invalid input image: must be a single-channel 8-bit grayscale image." << std::endl;
+        return;
+    }
+
+    // Calculate image derivatives
+    Mat abs_grad_x, abs_grad_y;
+    Sobel(src_gray, abs_grad_x, CV_32FC1, 1, 0, 3, 1, 0, BORDER_REPLICATE); // Use BORDER_REPLICATE for consistency
+    Sobel(src_gray, abs_grad_y, CV_32FC1, 0, 1, 3, 1, 0, BORDER_REPLICATE);
+
+    Mat x2_derivative, y2_derivative, xy_derivative;
+    pow(abs_grad_x, 2.0, x2_derivative);
+    pow(abs_grad_y, 2.0, y2_derivative);
+    multiply(abs_grad_x, abs_grad_y, xy_derivative);
+
+    Mat x2g_derivative, y2g_derivative, xyg_derivative;
+    GaussianBlurr(x2_derivative, x2g_derivative, Size(7, 7), 2.0, 0.0, BORDER_REPLICATE);
+    GaussianBlurr(y2_derivative, y2g_derivative, Size(7, 7), 0.0, 2.0, BORDER_REPLICATE);
+    GaussianBlurr(xy_derivative, xyg_derivative, Size(7, 7), 2.0, 2.0, BORDER_REPLICATE);
+
+    Mat x2y2, xy ,mtrace;
+    multiply(x2g_derivative, y2g_derivative, x2y2);
+    multiply(xyg_derivative, xyg_derivative, xy);
+    pow(x2g_derivative + y2g_derivative, 2.0, mtrace);
+    dst = x2y2 - xy - k * mtrace;
+}
+
+
+Mat detectHarris(const Mat& grayImage) {
+    Mat output;
+    Harris(grayImage, output, 0.04);
+    return output;
+}
+void convertScaleAbsManual(const Mat& src, Mat& dst) {
+    dst.create(src.size(), CV_8UC1); 
+
+    for (int i = 0; i < src.rows; ++i) {
+        const float* srcRow = src.ptr<float>(i); 
+        uchar* dstRow = dst.ptr<uchar>(i); 
+
+        for (int j = 0; j < src.cols; ++j) {
+            dstRow[j] = saturate_cast<uchar>(abs(srcRow[j])); 
+        }
+    }
+}
+// ve hinh tron
+void draw_cirle(Mat& image, const Mat& cornerMap) {
+    Mat outputNorm, outputNormScaled;
+    normalize(cornerMap, outputNorm, 0, 255, NORM_MINMAX, CV_32FC1, Mat());
+    convertScaleAbsManual(outputNorm, outputNormScaled);
+
+    for (int j = 0; j < outputNorm.rows; j++) {
+        for (int i = 0; i < outputNorm.cols; i++) {
+            if ((int)outputNorm.at<float>(j, i) > 100) {
+                circle(image, Point(i, j), 4, Scalar(0, 0, 255), 1, 8, 0);
+            }
+        }
+    }
+}
+
+// out anh
+
+void harrisCornerDetector(const string& imagePath) {
+    Mat image = loadImage(imagePath);
+    if (!image.empty()) {
+        imshow("Original image", image);
+        Mat grayImage = convertToGray(image);
+        Mat cornerMap = detectHarris(grayImage);
+    }
+}
+void displayAndSaveResult(const Mat& image, const std::string& outputImagePath) {
+    imshow("Output Harris", image);
+    imwrite(outputImagePath, image);
+    waitKey(0);
+}
+
+int main(int argc, char* argv[]) {
+    if (argc != 4 || std::string(argv[1]) != "-harris") {
+        cout << "Usage: <Executable file> -harris <InputFilePath> <OutputFilePath>" << endl;
+        return 1;
+    }
+
+    string inputImagePath = argv[2];
+    string outputImagePath = argv[3];
+
+    Mat image = loadImage(inputImagePath);
+    if (image.empty()) {
+        cout << "Error loading image" << endl;
+        return 1;
+    }
+
+    Mat grayImage = convertToGray(image);
+
+    Mat cornerMap = detectHarris(grayImage);
+
+    draw_cirle(image, cornerMap);
+
+    displayAndSaveResult(image, outputImagePath);
     return 0;
 }
